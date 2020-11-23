@@ -136,6 +136,10 @@ class AbstractModelTrainer():
         # training history is loaded if necessary        
         if load_history:
             self.load_history(net_version)
+        else:
+            norm_values = self.net_name + '_norm_vals.obj'
+            with open(norm_values, 'rb') as a:
+                self.norm_values = pickle.load(a)
        
 
     ##########################################################################
@@ -232,6 +236,10 @@ class AbstractModelTrainer():
         std_act, mean_act = torch.std_mean(action_torch, dim=0)
         
         self.norm_values = std_st, mean_st, std_act, mean_act
+        
+        norm_values = self.net_name + '_norm_vals.obj'
+        with open(norm_values, 'wb') as a:
+            pickle.dump(self.norm_values, a)
             
         # normalize validation set (ready for use)
         val_state_torch = torch.cat(tuple(d[0] for d in self.validation_set)).float().cuda()
@@ -456,7 +464,7 @@ def test_external(net_name):
     trainer = AbstractModelTrainer()
     
     pathlog = os.path.join(os.getcwd(), 'NeuralNetworks')
-    trainer.load_net(net_name, device, path_log = pathlog)
+    trainer.load_net(net_name, device, path_log = pathlog, load_history=False)
     
     trainer.test_net()
     
@@ -491,7 +499,9 @@ if __name__ == "__main__":
             net_version = args.net_version)
 
 #%%
-#remove_versions_other_than('Net_30_30_10_100000')
+#remove_versions_other_than('Net_45_45_15_50000')
 
 #%%
-#trainer = test_external('Net_50_50_10_100000')
+#trainer = test_external('Net_45_45_15_50000')
+#%%
+#trainer.test_net(reset_every = 20)
