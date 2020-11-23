@@ -182,16 +182,17 @@ class CartPoleEnv(gym.Env):
 
         
     #####################################################################################################
-    def reset(self, save_history = False, full_random = False):
+    def reset(self, save_history = False, full_random = False, max_val = None):
                 
+        if max_val is None:
+            max_val = self.max_state
+        
         self.duration = 0
         self.x_target = 0
         if not full_random:
             self.state = np.array([0,0,0.05*np.random.randn(),0,0])
         else:
-            b = self.max_state
-            a = -self.max_state
-            self.state = (b - a) * np.random.random(self.max_state.shape[0]) + a
+            self.state = 2*max_val * np.random.random(max_val.shape[0]) - max_val
 
         self.reset_update_storage(save_history = save_history)
 

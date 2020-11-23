@@ -99,6 +99,8 @@ class AbstractModelTrainer():
         self.obs_net = LinearModel('LinearModel',self.lr ,  (self.plant.state.shape[0]-1) , (self.plant.state.shape[0]-1)+1,*(self.layers_width)).cuda()
 
         # secondary training parameters
+        self.sequential_after_n_epochs = round(self.n_epochs*0.2)
+        
         self.random_frequency = 0.8  # percentage of instances in which control action is taken randomly
         self.training_sequence_max_length = 5  # max number of steps before a training sequence is resetted
         self.training_split = 0.75  # training set/validation set split
@@ -115,6 +117,7 @@ class AbstractModelTrainer():
         # initializations
         self.loss_history = np.empty((1,2),dtype = np.float)
         self.storage = []
+        self.storage_sequences = []
 
 
     ##########################################################################
@@ -133,13 +136,14 @@ class AbstractModelTrainer():
             else:
                 self.net_name += "_"+str(getattr(self.obs_net, 'n_layer_'+str(i)))
         
+        norm_values = self.net_name + '_norm_vals.obj'
+        with open(norm_values, 'rb') as a:
+            self.norm_values = pickle.load(a)
+        
         # training history is loaded if necessary        
         if load_history:
             self.load_history(net_version)
-        else:
-            norm_values = self.net_name + '_norm_vals.obj'
-            with open(norm_values, 'rb') as a:
-                self.norm_values = pickle.load(a)
+
        
 
     ##########################################################################
@@ -159,8 +163,7 @@ class AbstractModelTrainer():
         if net_version is not None:
             self.loss_history = self.loss_history[:net_version ,:]
         
-        # load training and validation sets
-        self.load_stored_data()
+
                 
 
     ##########################################################################
@@ -176,18 +179,20 @@ class AbstractModelTrainer():
         
         self.generate_datasets()
 
+
+
      
     ##########################################################################               
     # method is called to generate training and validation sets (when Net is not loaded externally)
     def store_data(self):
+    
     
         sim_completed = False
         failed_sims = 0
     
         while not sim_completed:    
             done = False
-            self.plant.reset(save_history = True, full_random = True)
-            
+            self.plant.reset(save_history = True, full_random = True, max_val = self.max_val)
             steps = 0
             while not done and steps < self.training_sequence_max_length:
                 # perform real plant step
@@ -195,13 +200,24 @@ class AbstractModelTrainer():
                     action = self.plant.get_controller_input()
                 else:
                     action = np.array([np.round((2*random.random()-1),3 )*self.act_max])
+                    
+                if steps== 0:
+                    actions_sequence = action
+                    initial_state = self.plant.state
+                else:
+                    actions_sequence = np.append(actions_sequence, action, axis = 0)
         
                 st, rew, done, info = self.plant.step(action)
                 
                 self.storage.append((torch.tensor(self.plant.state)[:-1].unsqueeze(0),\
                                      torch.tensor(action).unsqueeze(0), \
-                                         torch.tensor(st[:-1]).unsqueeze(0)))
+                                         torch.tensor(st[:-1]).unsqueeze(0)) )
                 steps +=1
+            
+            if not done:
+                self.storage_sequences.append((torch.tensor(initial_state)[:-1].unsqueeze(0),\
+                         torch.tensor(actions_sequence).unsqueeze(0) , \
+                             torch.tensor(st[:-1]).unsqueeze(0))  )
                 
             if len(self.storage) > self.max_samples_stored:
                 sim_completed = True
@@ -212,7 +228,7 @@ class AbstractModelTrainer():
         idx_split = round(len(self.storage)*self.training_split)
         self.training_set = self.storage[:idx_split]
         self.validation_set = self.storage[idx_split:]
-        
+       
         tr_set_file_name = self.net_name + '_tr_set.obj'
         with open(tr_set_file_name, 'wb') as a:
             pickle.dump(self.training_set, a)
@@ -222,6 +238,35 @@ class AbstractModelTrainer():
             pickle.dump(self.validation_set, a)
 
         self.generate_datasets()
+
+        # do the same for the sequences
+        random.shuffle(self.storage_sequences)
+        idx_split = round(len(self.storage_sequences)*self.training_split)
+        self.training_set_seq = self.storage_sequences[:idx_split]
+        self.validation_set_seq = self.storage_sequences[idx_split:]
+
+        seq_tr_set_file_name = self.net_name + '_seq_tr_set.obj'
+        with open(seq_tr_set_file_name, 'wb') as a:
+            pickle.dump(self.training_set_seq, a)
+
+        seq_val_set_file_name = self.net_name + '_seq_val_set.obj'
+        with open(seq_val_set_file_name, 'wb') as a:
+            pickle.dump(self.validation_set_seq, a)
+
+        self.generate_seq_datasets()
+
+
+    ##########################################################################
+    def generate_seq_datasets(self):
+        
+        std_st, mean_st, std_act, mean_act = self.norm_values
+        # normalize validation set (ready for use)
+        val_seq_state_init = torch.cat(tuple(d[0] for d in self.validation_set_seq)).float().cuda()
+        val_seq_actions = torch.cat(tuple(d[1] for d in self.validation_set_seq)).float().cuda()
+        self.val_seq_final_state = torch.cat(tuple(d[2] for d in self.validation_set_seq)).float().cuda()
+
+        self.norm_val_seq_state_init  = (val_seq_state_init-mean_st)/std_st
+        self.norm_val_seq_action = (val_seq_actions-mean_act)/std_act
 
 
     ##########################################################################
@@ -251,7 +296,52 @@ class AbstractModelTrainer():
 
 
     ##########################################################################
-    def update_1step_observer(self):
+    def update_sequence(self):
+    
+        # extract minibatch from training set
+        minibatch = random.sample(self.training_set_seq, self.batch_size)
+
+        initial_state_batch   = torch.cat(tuple(d[0] for d in minibatch)).float().cuda()
+        action_seq_batch  = torch.cat(tuple(d[1] for d in minibatch)).float().cuda()
+        final_state_batch = torch.cat(tuple(d[2] for d in minibatch)).float().cuda()
+        
+       # normalize minibatch        
+        std_st, mean_st, std_act, mean_act = self.norm_values
+        
+        state_est = initial_state_batch
+        norm_action_seq = (action_seq_batch-mean_act)/std_act
+
+        for i in range(self.training_sequence_max_length):            
+            # estimate next state with NN
+            norm_state = (state_est-mean_st)/std_st
+            state_est = self.obs_net(torch.cat((norm_state ,norm_action_seq[:,i].unsqueeze(1)), dim = 1))    
+            i += 1
+
+        # weights update cycle
+        self.obs_net.optimizer.zero_grad()
+        loss_est = self.obs_net.criterion(torch.matmul(final_state_batch,self.torch_weight), \
+                                          torch.matmul(state_est,self.torch_weight))
+        loss_est.backward(retain_graph = False)
+        """
+        for p in list(filter(lambda p: p.grad is not None, self.obs_net.parameters())):
+            print(p.grad.data.norm(2).item())
+        """
+        self.obs_net.optimizer.step()
+        
+        # evaluate on validation set (no state weighing)        
+        with torch.no_grad():
+            norm_batch = self.norm_val_seq_state_init
+            for i in range(self.training_sequence_max_length):    
+                val_state_est = self.obs_net(torch.cat((norm_batch ,self.norm_val_seq_action[:,i].unsqueeze(1)), dim = 1))
+                norm_batch = (val_state_est-mean_st)/std_st
+            
+            val_loss = self.obs_net.criterion(self.val_seq_final_state,val_state_est)
+        
+        return loss_est.item(), val_loss.item()
+
+
+    ##########################################################################
+    def update_1step(self):
     
         # extract minibatch from training set
         minibatch = random.sample(self.training_set, self.batch_size)
@@ -289,10 +379,14 @@ class AbstractModelTrainer():
 
 
     ##########################################################################
-    def updater_routine(self, net_version):
+    def updater_routine(self, net_version, in_line_testing = False):
         
         for ii in tqdm(range(1+net_version, 1+net_version+self.n_epochs)):
-            loss, val_loss = self.update_1step_observer()
+            if ii < self.sequential_after_n_epochs:
+                loss, val_loss = self.update_1step()
+            else:
+                loss, val_loss = self.update_sequence()
+            
             new_loss = np.array([loss, val_loss])[np.newaxis,:]
             self.loss_history = np.append(self.loss_history, new_loss, axis = 0)
             
@@ -313,7 +407,12 @@ class AbstractModelTrainer():
                     pass                    
 
                 if not ii % self.save_every_n:
-                    self.obs_net.save_net_params(net_name = self.net_name +'_' +str(ii))
+                    net_name = self.net_name +'_' +str(ii)
+                    self.obs_net.save_net_params(net_name = net_name)
+                    # inline testing for debugging only
+                    if in_line_testing:
+                        self.test_net(reset_every = self.training_sequence_max_length,  save_test_result = True, save_name = net_name)
+                    
 
         loss_array = self.loss_history[1:,0]
         val_loss_array = self.loss_history[1:,1]
@@ -327,7 +426,7 @@ class AbstractModelTrainer():
 
     ##########################################################################
     # test Abstract Model
-    def test_net(self, reset_every = 10,  save_test_result = False):
+    def test_net(self, reset_every = 10,  save_test_result = True, save_name = None):
     
         # generate states sequence
         self.plant.reset()
@@ -344,7 +443,7 @@ class AbstractModelTrainer():
         # initialize vectors/tensors
         states_stored_np,inputs =  self.plant.get_complete_sequence()
         
-        #states_stored_np = np.concatenate((self.cartpole.cartpole.state_archive,self.cartpole.cartpole.target_pos[:,np.newaxis]),axis = 1 )
+        #states_stored_np = np.concatenate((self.plant.cartpole.state_archive,self.plant.cartpole.target_pos[:,np.newaxis]),axis = 1 )
         states_stored = torch.tensor(states_stored_np ).float().cuda()
         
         std_st, mean_st, std_act, mean_act = self.norm_values
@@ -352,12 +451,19 @@ class AbstractModelTrainer():
         states_stored_norm = (states_stored[:,:-1]-mean_st)/std_st
         
         states_sequence_obs = np.zeros(states_stored.shape)
-        states_sequence_obs[0,:-1] = states_stored_norm[0,:].cpu().numpy()
-        states_sequence_obs_norm = states_sequence_obs.copy()
+        states_sequence_obs[0,:-1] = states_stored_np[0,:-1]
+        #states_stored_norm[0,:].cpu().numpy()
         
+
+        # initial normalized state
         state_norm = states_stored_norm[0,:].unsqueeze(0)
         
-        #inputs = self.cartpole.cartpole.ctrl_inputs
+        
+        states_sequence_obs_norm = states_sequence_obs.copy()
+        states_sequence_obs_norm [0,:-1] = state_norm.cpu().numpy()
+        
+        
+        #inputs = self.plant.cartpole.ctrl_inputs
         inputs_norm = (inputs-mean_act.item())/std_act.item()
         
         # evaluate NN and store values
@@ -374,6 +480,14 @@ class AbstractModelTrainer():
             
             state_norm = ((next_state.clone()- mean_st)/std_st).detach().clone()
             states_sequence_obs_norm[i+1,:-1] = state_norm.cpu().detach().numpy().copy()
+
+        device = torch.device("cuda")
+        loss_test = self.obs_net.criterion(torch.tensor(states_sequence_obs[:,:-1]).to(device), states_stored[:,:-1])
+        print('##############################################################')
+        print('##############################################################')
+        print(f'loss evaluated on test sample: {loss_test.item()}')
+        print('##############################################################')
+        print('##############################################################')
 
         # figure generation
         fig1 = plt.figure()
@@ -401,11 +515,13 @@ class AbstractModelTrainer():
         fig1.show()
         
         if save_test_result:
-            fig1.savefig("result.png", dpi = 300) # save figure
+            if save_name is None:
+                save_name = 'result'
+            fig1.savefig( save_name+ ".png", dpi = 300) # save figure
         
 
     ##########################################################################
-    def plot_training_history(self, save_history = False):
+    def plot_training_history(self, save_history = False, start_sample = 1):
         vert_zoom = np.minimum(0.005 , self.loss_history)
         
         fig = plt.figure()
@@ -413,8 +529,7 @@ class AbstractModelTrainer():
         ax2 = fig.add_subplot(412)
         ax3 = fig.add_subplot(413)
         ax4 = fig.add_subplot(414)
-        start_sample = 1
-    
+        
         ax1.plot(self.loss_history[start_sample:,0])
         ax2.plot(vert_zoom[start_sample:,0])
         ax3.plot(self.loss_history[start_sample:,1])
@@ -438,7 +553,7 @@ def train_net(batch_size = 256, lr = 0.0002, n_epochs = 5000 , max_samples_store
         print('loading data...')        
         device = torch.device("cuda")
         net_name = trainer.net_name + "_" + str(net_version)
-        trainer.load_net(net_name, device, net_version)
+        trainer.load_net(net_name, device, net_version, load_history=True)
         
         trainer.load_stored_data()
         print('loading complete')
@@ -447,7 +562,7 @@ def train_net(batch_size = 256, lr = 0.0002, n_epochs = 5000 , max_samples_store
         trainer.store_data()
     
     
-    trainer.updater_routine(net_version*load_net_params)
+    trainer.updater_routine(net_version*load_net_params, in_line_testing=True)
     
     trainer.plot_training_history()
     
@@ -464,7 +579,7 @@ def test_external(net_name):
     trainer = AbstractModelTrainer()
     
     pathlog = os.path.join(os.getcwd(), 'NeuralNetworks')
-    trainer.load_net(net_name, device, path_log = pathlog, load_history=False)
+    trainer.load_net(net_name, device, path_log = pathlog, load_history=True)
     
     trainer.test_net()
     
@@ -497,11 +612,19 @@ if __name__ == "__main__":
          max_samples_stored = args.memory, layers_width=args.layers_list, \
              state_weights = args.state_weights, load_net_params = args.load_net_params, \
             net_version = args.net_version)
+    """
+    train_net(batch_size = 32, lr = 0.001, n_epochs = 10000, \
+         max_samples_stored = 10000, layers_width= [10, 10], \
+             state_weights = [1,1,1,1] , load_net_params = False, \
+            net_version = 0)
+    """
 
 #%%
-#remove_versions_other_than('Net_45_45_15_50000')
+#remove_versions_other_than('Net_50_50_20_50000')
 
 #%%
-#trainer = test_external('Net_45_45_15_50000')
+#trainer = test_external('Net_50_50_15_150000')
 #%%
-#trainer.test_net(reset_every = 20)
+#trainer.test_net(reset_every = 4)
+#%%
+#trainer.plot_training_history(save_history = False, start_sample = 80000)

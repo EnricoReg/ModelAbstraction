@@ -15,7 +15,7 @@ import numpy as np
 model = LinearModel()
 
 device = torch.device("cuda")
-net_name = 'Net_7_7_20000'
+net_name = 'Net_50_50_15_150000'
 path_log = os.path.join(os.getcwd(), 'NeuralNetworks')
 
 # create input tensor
