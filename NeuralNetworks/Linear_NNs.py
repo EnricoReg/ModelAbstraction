@@ -248,36 +248,47 @@ class LinearModel(nn.Module):
     
     ##########################################################################
     # save the network parameters and the training history
-    def save_net_params(self,path_log = None,net_name = 'my_net'):
+    def save_net_params(self,path_log = None,net_name = 'my_net', epoch = None, loss = None):
         
         if path_log is None:
             path_log = os.path.dirname(os.path.abspath(__file__))
         
         filename_pt = os.path.join(path_log, net_name + '.pt')
-        opt_filename_pt = os.path.join(path_log, net_name + '_opt.pt')
+        #opt_filename_pt = os.path.join(path_log, net_name + '_opt.pt')
 
-        torch.save(self.state_dict(),filename_pt)
-        torch.save(self.optimizer.state_dict(),opt_filename_pt)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': self.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'loss': loss,
+            },filename_pt)
+        
+        #torch.save(self.optimizer.state_dict(),opt_filename_pt)
 
 
     ##########################################################################
     # load the network parameters and the training history
     def load_net_params(self,path_log,net_name, device):    
         filename_pt = os.path.join(path_log, net_name + '.pt')
-        opt_filename_pt = os.path.join(path_log, net_name + '_opt.pt')
+        checkpoint = torch.load(filename_pt, map_location=device)
+        
+        epoch = checkpoint['epoch']
+        model_state = checkpoint['model_state_dict']
+        opt_state = checkpoint['optimizer_state_dict']
+        loss = checkpoint['loss']
         
         # update net parameters based on state_dict() (which is loaded afterwards)
-        self.n_inputs =  (torch.load(filename_pt, map_location=device)['fc1.weight']).shape[1]
-        self.net_depth = int(len(torch.load(filename_pt, map_location=device))/2)-1
+        self.n_inputs =  (model_state['fc1.weight']).shape[1]
+        self.net_depth = int(len(model_state)/2)-1
         for i in range(1,self.net_depth+1):
-            setattr(self, 'n_layer_'+str(i), (torch.load(filename_pt, map_location=device)['fc' + str(i) + '.weight']).shape[0])
-        self.n_outputs =  (torch.load(filename_pt, map_location=device)['fc_output.weight']).shape[0]
+            setattr(self, 'n_layer_'+str(i), (model_state['fc' + str(i) + '.weight']).shape[0])
+        self.n_outputs =  (model_state['fc_output.weight']).shape[0]
         self.update_NN_structure()        
-        self.load_state_dict(torch.load(filename_pt, map_location=device))
+        self.load_state_dict(model_state)
         self.to(device)  # required step when loading a model on a GPU (even if it was also trained on a GPU)
         
         self.initialize_optimizer()
-        self.optimizer.load_state_dict(torch.load(opt_filename_pt, map_location=device ))
+        self.optimizer.load_state_dict(opt_state)
         
         self.eval()
 

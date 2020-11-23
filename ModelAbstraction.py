@@ -319,14 +319,14 @@ class AbstractModelTrainer():
 
     ##########################################################################
     # test Abstract Model
-    def test_net(self, duration = 200, reset_every = 10,  save_test_result = False):
+    def test_net(self, reset_every = 10,  save_test_result = False):
     
         # generate states sequence
         self.plant.reset()
         done = False    
         steps = 0
     
-        while steps < duration and not done:
+        while not done:
             # perform real plant step
             action = self.plant.get_controller_input()
             #action = np.array([np.round((2*random.random()-1),3 )*self.act_max])            
@@ -334,7 +334,7 @@ class AbstractModelTrainer():
             steps += 1
         
         # initialize vectors/tensors
-        states_stored_np,inputs =  self.get_complete_sequence()
+        states_stored_np,inputs =  self.plant.get_complete_sequence()
         
         #states_stored_np = np.concatenate((self.cartpole.cartpole.state_archive,self.cartpole.cartpole.target_pos[:,np.newaxis]),axis = 1 )
         states_stored = torch.tensor(states_stored_np ).float().cuda()
@@ -477,7 +477,7 @@ def remove_versions_other_than(net_name):
     iteration_string = net_name.replace(trainer.net_name,'')
     for fname in NN_dir:
         if fname.startswith(trainer.net_name):
-            iteration_keeper = fname.endswith(iteration_string+'.pt') or fname.endswith(iteration_string+'_opt.pt')
+            iteration_keeper = fname.endswith(iteration_string+'.pt') 
             if not iteration_keeper:
                 os.remove(os.path.join(pathlog, fname))
 
