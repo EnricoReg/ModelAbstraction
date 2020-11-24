@@ -5,7 +5,8 @@ import numpy as np
 from scipy.interpolate import griddata, interpolate 
 import matplotlib.pyplot as plt
 import numpy
-
+import os
+from NeuralNetworks.Linear_NNs import LinearModel
 
 class ElMotor:
     def __init__(self):
@@ -74,15 +75,6 @@ class ElMotor:
         self.eff_matrix[yy >  self.f_max_rq(xx) ] = np.nan
 
     def plotEffMap(self):
-
-        """
-        fig = plt.figure()
-        #ax1 = fig.add_subplot(111)
-        ax = plt.contourf(self.x2d, self.y2d, self.efficiency, cmap = 'jet')
-        #ax1.plot(self.EM_w_list,self.EM_T_max_list )
-        plt.colorbar(ax)
-        plt.show()
-        """
         
         fig1 = plt.figure()
         ax1 = plt.contourf(self.speed_vect, self.torque_vect, self.eff_matrix,levels = 30 ,cmap = 'jet')
@@ -91,16 +83,24 @@ class ElMotor:
         plt.colorbar(ax1)
         plt.show()
 
+    def save_tq_limit(self):
+        torque_limit = torch.tensor(np.concatenate( (self.speed_vect[:,np.newaxis], self.f_max_rq(self.speed_vect)[:,np.newaxis]), axis = 1 ))
+        
+        file_name = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'torque_limit.pt')
+        torch.save(torque_limit, file_name)
+
         
 #%%
 
 emot = ElMotor()
 emot.plotEffMap()   
 
+#emot.save_tq_limit()
+
 #%%
-class Car:
+class Car():
     """ Describes the physical behaviour of the vehicle """
-    def __init__(self, device):
+    def __init__(self, device, initial_speed = 0.0):
         self.device=device
 
         self._max_acceleration = 3.0   #m/s^2
@@ -109,7 +109,7 @@ class Car:
         self._min_velocity = 0.0
         self.gravity = 9.81 #m/s^2
         self.position = torch.tensor(0.0)
-        self.velocity = torch.tensor(0.0)
+        self.velocity = torch.tensor(initial_speed)
         self.acceleration = torch.tensor(0.0)
         self.friction_coefficient = 0.01 # will be ignored
 
@@ -117,14 +117,14 @@ class Car:
         self.rho =  1.22          #the air density, 
         self.aer_coeff = 0.4     #the aerodynamic coefficient
         self.veh_surface  = 2  #equivalent vehicle surface
-        self.rr_coeff =  8*10^-3     #rolling resistance coefficient
+        self.rr_coeff =  8e-3     #rolling resistance coefficient
         self.gear_ratio = 10
         self.wheel_radius = 0.3  #effective wheel radius
         self._max_whl_brk_torque = 2000  #Nm
         
-        self.e_motor = ElMotor()
+        self.e_motor = ElMotor_torch(device = self.device,net_name = 'Net_10_15_15_5')
         
-        self.max_e_tq = np.max(self.e_motor.EM_T_max_list)
+        self.max_e_tq = np.max(self.e_motor.max_torque)
         self.min_e_tq = - self.max_e_tq
         self.e_motor_speed = torch.tensor(0.0)
         self.e_torque= torch.tensor(0.0)
@@ -132,8 +132,8 @@ class Car:
         self.e_power = torch.tensor(0.0)
 
     def motor_efficiency(self):
-        eff = self.e_motor.getEfficiency(self.e_motor_speed.item(),self.e_torque.item())
-        return eff**(-torch.sign(self.e_torque))
+        eff = self.e_motor.getEfficiency(self.e_motor_speed , self.e_torque)
+        return eff**(-torch.sign(self.e_torque)).to(self.device)
     
     def calculate_wheels_torque(self, e_torque, br_torque):
         self.br_torque = torch.clamp(br_torque, 0, self._max_whl_brk_torque)
@@ -160,10 +160,148 @@ class Car:
         self.e_motor_speed = self.velocity*self.gear_ratio/self.wheel_radius
         
         #update min/max e-torque based on new motor speed
-        self.min_e_tq, self.max_e_tq = self.e_motor.getMinMaxTorque(self.e_motor_speed)
+        self.max_e_tq = self.e_motor.getMinMaxTorque(self.e_motor_speed)
+        self.min_e_tq = -self.max_e_tq
         # update power consumed
         self.e_power = self.e_motor_speed*self.e_torque*self.motor_efficiency().item()        
         self.position += self.velocity * dt
 
         print(f"pos={self.position.item()}\tpower={self.e_power.item()}")
 
+#%%
+
+class ElMotor_torch():
+    
+    def __init__(self, device,net_name, path_log = os.path.abspath(os.path.dirname(__file__))):
+        self.device = device
+        self.net = LinearModel('LinearModel',0.0002, 1, 2  )
+        self.net.load_net_params( path_log, net_name, self.device)
+        
+        file_name = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'torque_limit.pt')
+        self.tq_limit = torch.load(file_name)
+        
+        self.max_speed = 1150
+        self.max_torque = 180
+
+    def getEfficiency(self, speed, torque):
+        data = torch.stack(( speed/self.max_speed , torque/self.max_torque ) , dim = 0).to(self.device).float()
+        with torch.no_grad():
+            eff = self.net(data)
+        
+        return eff
+        
+    def getMinMaxTorque(self, speed):
+        idx = torch.argmax(self.tq_limit[:,0]-speed)
+        return self.tq_limit[idx,1]
+    
+    def plotEffMap(self):
+        
+        speed_vect = np.linspace(0,self.max_speed,201)
+        torque_vect = np.linspace(0,self.max_torque,151)        
+        
+        xx,yy = np.meshgrid(speed_vect, torque_vect)
+        xx_norm = xx/self.max_speed
+        yy_norm = yy/self.max_torque
+        
+        test_data = torch.stack((torch.tensor(xx_norm),torch.tensor(yy_norm)),dim = 2).to(self.device)
+        with torch.no_grad():
+            test_y = self.net(test_data.float()).squeeze(2).cpu()
+        
+        test_y[torch.tensor(yy) >  self.tq_limit[:,1].unsqueeze(0) ] = np.nan
+        test_y = test_y.detach().numpy()
+        
+        fig1 = plt.figure()
+        ax1 = plt.contourf(speed_vect, torque_vect, test_y, levels = 30 ,cmap = 'jet')
+        plt.plot(self.tq_limit[:,0],self.tq_limit[:,1] , 'k')
+        plt.colorbar(ax1)
+        plt.show()
+                
+    
+#%%
+device = torch.device('cuda')
+
+emot = ElMotor_torch(device = device,net_name = 'Net_10_15_15_5' )
+emot.plotEffMap()
+
+#%%
+journey_length = 200
+
+initial_speed = 10
+ref_vehicle_speed = 15 #m/s
+target_distance = 20
+ref_vehicle_position = 20 #m ahead of controlled vehicle
+dt = 1 #s
+cum_error = 0
+cum_energy = 0
+
+device = torch.device('cuda')
+car = Car(device, initial_speed = initial_speed)
+
+# car position, car speed, vehicle position, vehicle speed
+state_storage = np.array([[0, initial_speed, ref_vehicle_position,ref_vehicle_speed]])
+# e torque, br torque
+ctrl_storage = np.array([[0, 0, 0, 0, cum_energy]])
+
+for i in range(journey_length):
+    
+    distance = ref_vehicle_position - car.position.item()
+    error = target_distance - distance
+    cum_error += error
+    
+    e_torque = -(2.5*error +.2* cum_error)
+    
+    br_torque = 0
+    if error > 10:
+        br_torque = 100
+    
+    car.update(dt, torch.tensor(e_torque), torch.tensor(br_torque), dist_force=0)
+
+    acc = np.random.randn()
+    ref_vehicle_speed += acc * dt
+    ref_vehicle_speed = np.clip(ref_vehicle_speed, 10, 20)
+    ref_vehicle_position += ref_vehicle_speed* dt
+    
+    power = car.e_power.item()
+    cum_energy += power*dt
+    
+    state_storage = np.append(state_storage, np.array([[car.position.item(), car.velocity.item(),ref_vehicle_position, ref_vehicle_speed ]]), axis = 0)
+    ctrl_storage = np.append(ctrl_storage, np.array([[e_torque, br_torque, error, power, cum_energy]]), axis = 0)
+    
+    print(f'iteration {i}')
+
+
+fig = plt.figure()
+ax_0 = fig.add_subplot(4,1,1)
+ax_1 = fig.add_subplot(4,1,2)
+ax_2 = fig.add_subplot(4,1,3)
+ax_3 = fig.add_subplot(4,1,4)
+
+ax_0.plot(ctrl_storage[:,2])
+ax_0.plot(20*np.ones((journey_length,1)), 'r')
+ax_0.plot(-20*np.ones((journey_length,1)))
+
+
+ax_1.plot(state_storage[:,0])
+ax_1.plot(state_storage[:,2])
+ax_1.legend(['car','reference'])
+
+ax_2.plot(state_storage[:,1])
+ax_2.plot(state_storage[:,3])
+
+ax_3.plot(ctrl_storage[:,0])
+ax_3.plot(ctrl_storage[:,1])
+ax_3.legend(['electric','brake'])
+
+plt.show()
+
+fig_1 = plt.figure()
+ax0 = fig_1.add_subplot(2,1,1)
+ax1 = fig_1.add_subplot(2,1,2)
+
+ax0.plot(ctrl_storage[:,3])
+ax0.legend(['power'])
+
+ax1.plot(ctrl_storage[:,4])
+ax1.legend(['cum energy'])
+
+plt.show()

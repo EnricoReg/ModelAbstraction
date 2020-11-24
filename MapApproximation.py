@@ -20,11 +20,13 @@ from platooning_env.model_platooning_energy import ElMotor
 emot = ElMotor()
 emot.plotEffMap()   
 
-NN_map = LinearModel('LinearModel',0.0002, 1, 2, 10,15, 15, 5 )
+
+hidden_layers = [10,15, 15, 5]
+NN_map = LinearModel('LinearModel',0.0002, 1, 2, hidden_layers )
 
 
 from torch.utils.data import DataLoader, TensorDataset
-
+import os
 
 
 
@@ -123,3 +125,9 @@ plt.plot(emot.EM_w_list,emot.EM_T_max_list , 'k')
 plt.colorbar(ax2)
 
 #%%
+name_string = 'Net'
+for i in hidden_layers:
+    name_string += '_' + str(i)   
+
+path = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'platooning_env')
+NN_map.save_net_params(path_log = path,net_name = name_string, epoch = None, loss = None)
