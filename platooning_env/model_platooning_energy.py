@@ -77,11 +77,19 @@ class ElMotor:
     def plotEffMap(self):
         
         fig1 = plt.figure()
-        ax1 = plt.contourf(self.speed_vect, self.torque_vect, self.eff_matrix,levels = 30 ,cmap = 'jet')
+        ax1 = fig1.add_subplot(111)
+        ax1.set_xlim([0,self.max_speed])
+        ax1.set_ylim([0,self.max_torque])
         
+        
+        levels = np.linspace(0.5, 0.9, 28)
+        
+        ax1 = plt.contourf(self.speed_vect, self.torque_vect, self.eff_matrix,levels = levels ,cmap = 'jet')
+
         plt.plot(self.EM_w_list,self.EM_T_max_list , 'k')
         plt.colorbar(ax1)
         plt.show()
+        return fig1
 
     def save_tq_limit(self):
         torque_limit = torch.tensor(np.concatenate( (self.speed_vect[:,np.newaxis], self.f_max_rq(self.speed_vect)[:,np.newaxis]), axis = 1 ))
@@ -93,9 +101,10 @@ class ElMotor:
 #%%
 
 emot = ElMotor()
-emot.plotEffMap()   
+fig = emot.plotEffMap()   
 
-#emot.save_tq_limit()
+fig.savefig('EffMapNumpy.png')
+
 
 #%%
 class Car():
@@ -208,20 +217,30 @@ class ElMotor_torch():
             test_y = self.net(test_data.float()).squeeze(2).cpu()
         
         test_y[torch.tensor(yy) >  self.tq_limit[:,1].unsqueeze(0) ] = np.nan
-        test_y = test_y.detach().numpy()
+        test_y = np.minimum(0.9,test_y.detach().numpy())
         
         fig1 = plt.figure()
-        ax1 = plt.contourf(speed_vect, torque_vect, test_y, levels = 30 ,cmap = 'jet')
+        
+        ax1 = fig1.add_subplot(111)
+        ax1.set_xlim([0,self.max_speed])
+        ax1.set_ylim([0,self.max_torque])
+        
+        levels = np.linspace(0.5, 0.9, 28)
+        ax1 = plt.contourf(speed_vect, torque_vect, test_y, levels=levels ,cmap = 'jet')
         plt.plot(self.tq_limit[:,0],self.tq_limit[:,1] , 'k')
+        
+
         plt.colorbar(ax1)
         plt.show()
-                
+        
+        return fig1
     
 #%%
 device = torch.device('cuda')
 
 emot = ElMotor_torch(device = device,net_name = 'Net_10_15_15_5' )
-emot.plotEffMap()
+fig = emot.plotEffMap()
+fig.savefig('EffMapTorch.png')
 
 #%%
 journey_length = 200
@@ -248,7 +267,7 @@ for i in range(journey_length):
     error = target_distance - distance
     cum_error += error
     
-    e_torque = -(2.5*error +.2* cum_error)
+    e_torque = -(2.5*error +.1* cum_error)
     
     br_torque = 0
     if error > 10:
@@ -270,38 +289,47 @@ for i in range(journey_length):
     print(f'iteration {i}')
 
 
-fig = plt.figure()
-ax_0 = fig.add_subplot(4,1,1)
-ax_1 = fig.add_subplot(4,1,2)
-ax_2 = fig.add_subplot(4,1,3)
-ax_3 = fig.add_subplot(4,1,4)
+fig1 = plt.figure()
+ax_0 = fig1.add_subplot(3,1,1)
+ax_1 = fig1.add_subplot(3,1,2)
+ax_2 = fig1.add_subplot(3,1,3)
+
 
 ax_0.plot(ctrl_storage[:,2])
+ax_0.plot(0*np.ones((journey_length,1)), 'k',linewidth=0.5)
 ax_0.plot(20*np.ones((journey_length,1)), 'r')
-ax_0.plot(-20*np.ones((journey_length,1)))
+#ax_0.plot(-20*np.ones((journey_length,1)))
+ax_0.legend(['distancing error','reference','crash line' ])
 
-
-ax_1.plot(state_storage[:,0])
 ax_1.plot(state_storage[:,2])
-ax_1.legend(['car','reference'])
+ax_1.plot(state_storage[:,0])
+ax_1.legend(['leader pos','car position'])
 
-ax_2.plot(state_storage[:,1])
+
 ax_2.plot(state_storage[:,3])
+ax_2.plot(state_storage[:,1])
+ax_2.legend(['leader vel','car vel'])
 
-ax_3.plot(ctrl_storage[:,0])
-ax_3.plot(ctrl_storage[:,1])
-ax_3.legend(['electric','brake'])
+fig1.savefig('state_signals.png')
+
 
 plt.show()
 
-fig_1 = plt.figure()
-ax0 = fig_1.add_subplot(2,1,1)
-ax1 = fig_1.add_subplot(2,1,2)
+fig2 = plt.figure()
+ax0 = fig2.add_subplot(3,1,1)
+ax1 = fig2.add_subplot(3,1,2)
+ax2 = fig2.add_subplot(3,1,3)
 
 ax0.plot(ctrl_storage[:,3])
 ax0.legend(['power'])
 
 ax1.plot(ctrl_storage[:,4])
 ax1.legend(['cum energy'])
+
+ax2.plot(ctrl_storage[:,0])
+ax2.plot(ctrl_storage[:,1])
+ax2.legend(['electric tq','brake tq'])
+
+fig2.savefig('ctrl_signals.png')
 
 plt.show()
