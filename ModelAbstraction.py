@@ -39,6 +39,9 @@ parser.add_argument("-e", "--epochs", dest="n_epochs", type = int, default=40, h
 parser.add_argument("-l", "--load", dest="load_net_params", type=bool, default=False,
                     help="load net parameters")
 
+parser.add_argument("-d", "--load-dataset", dest="load_dataset", type=bool, default=False,
+                    help="load dataset")
+
 parser.add_argument("-bs", "--batch-size", dest="batch_size", type=int, default=32,
                     help="training batch size")
 
@@ -55,15 +58,16 @@ parser.add_argument(
   dest = "layers_list", type=int, default=[10,10],  # default if nothing is provided
 )
 
-
 parser.add_argument("-n", "--net-version", dest="net_version", type=int, default=0,
                     help="net version to load")
+
+parser.add_argument("-s", "--sequence-length", dest="sequence_length", type=int, default=10,
+                    help="trajectories length")
 
 parser.add_argument("-m", "--memory-size", dest="memory", type=int, default=10000,
                     help="memory size for training set")
 
 args = parser.parse_args()
-
 
 torch.autograd.set_detect_anomaly(False)
         
@@ -71,7 +75,8 @@ torch.autograd.set_detect_anomaly(False)
 class AbstractModelTrainer():
     
     ##########################################################################
-    def __init__(self, batch_size = 128, lr = 0.001, n_epochs = 100, max_samples_stored=20000, layers_width= (5,5), state_weights = (1,1,1,1) ):
+    def __init__(self, batch_size = 128, lr = 0.001, n_epochs = 100, max_samples_stored=20000, \
+                 layers_width= (5,5), state_weights = (1,1,1,1), training_sequence_max_length = 5 ):
         
         # main training parameters
         self.lr = lr
@@ -79,6 +84,8 @@ class AbstractModelTrainer():
         self.max_samples_stored = max_samples_stored
         self.layers_width = layers_width
         self.batch_size = batch_size
+        self.training_sequence_max_length = training_sequence_max_length  
+        # max number of steps before a training sequence is resetted
  
         # state weighing (created directly as torch tensor)
         self.torch_weight = torch.from_numpy(np.diag(state_weights)).float().cuda()
@@ -99,10 +106,9 @@ class AbstractModelTrainer():
         self.obs_net = LinearModel('LinearModel',self.lr ,  (self.plant.state.shape[0]-1) , (self.plant.state.shape[0]-1)+1,*(self.layers_width)).cuda()
 
         # secondary training parameters
-        self.sequential_after_n_epochs = round(self.n_epochs*0.2)
+        self.sequential_after_n_epochs = round(self.n_epochs*0.05)
         
         self.random_frequency = 0.8  # percentage of instances in which control action is taken randomly
-        self.training_sequence_max_length = 5  # max number of steps before a training sequence is resetted
         self.training_split = 0.75  # training set/validation set split
 
         # max values of states and actuation
@@ -178,6 +184,19 @@ class AbstractModelTrainer():
             self.validation_set = pickle.load(a)
         
         self.generate_datasets()
+        
+        # load training set
+        seq_tr_set_file_name = self.net_name + '_seq_tr_set.obj'
+        with open(seq_tr_set_file_name, 'rb') as a:
+            self.training_set = pickle.load(a)
+        # load validation set
+        seq_val_set_file_name = self.net_name + '_seq_val_set.obj'
+        with open(seq_val_set_file_name, 'rb') as a:
+            self.validation_set = pickle.load(a)
+        
+        self.generate_seq_datasets()
+        
+        self.training_sequence_max_length = self.norm_val_seq_action.shape[1]
 
 
 
@@ -542,22 +561,35 @@ class AbstractModelTrainer():
 
 def train_net(batch_size = 256, lr = 0.0002, n_epochs = 5000 , max_samples_stored = 20000, \
          layers_width = (5,5), state_weights = (1,1,1,1), load_net_params = False, \
-            net_version = 0):
+            net_version = 0, sequence_length = 10, load_dataset = False ):
     
+    """
+    print(batch_size)
+    print(lr)
+    print(n_epochs)
+    print(max_samples_stored)
+    print(layers_width)
+    print(state_weights)
+    print(load_net_params)
+    print(net_version)
+    print(sequence_length)
+    print(load_dataset)
+    """
+
 
     trainer = AbstractModelTrainer(batch_size = batch_size, lr = lr, n_epochs = n_epochs, \
                       max_samples_stored = max_samples_stored, layers_width = layers_width, \
                           state_weights = state_weights)
     
     if load_net_params:
-        print('loading data...')        
         device = torch.device("cuda")
         net_name = trainer.net_name + "_" + str(net_version)
         trainer.load_net(net_name, device, net_version, load_history=True)
         
+    if load_dataset:
+        print('loading data...')  
         trainer.load_stored_data()
         print('loading complete')
-        
     else:
         trainer.store_data()
     
@@ -611,7 +643,8 @@ if __name__ == "__main__":
     train_net(batch_size = args.batch_size, lr = args.lr, n_epochs = args.n_epochs, \
          max_samples_stored = args.memory, layers_width=args.layers_list, \
              state_weights = args.state_weights, load_net_params = args.load_net_params, \
-            net_version = args.net_version)
+            net_version = args.net_version, sequence_length = args.sequence_length, \
+                load_dataset = args.load_dataset)
     """
     train_net(batch_size = 32, lr = 0.001, n_epochs = 10000, \
          max_samples_stored = 10000, layers_width= [10, 10], \
